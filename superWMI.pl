@@ -31,6 +31,37 @@ while (($type,$nr)=each (%wd)){
 
 
 
+sub print_method_input_parameters{
+	my $method = shift;
+	my @inParams = in $method->{InParameters}->{properties_};
+	foreach (@inParams){
+		print "[" if isSetTrue($_,"Optional");
+		printf " %s(%s) ", $_->{Name}, $types{$_->{CIMTYPE}};
+		print "]" if isSetTrue($_,"Optional");
+	}
+}
+
+#print_methods("Win32_Share");
+#create_object("Win32_Share");
+sub create_object{
+	my $class = get_class(shift);
+	my $method = get_createby_method($class);
+	my $inParams = $method->{InParameters}->{properties_};
+	foreach (in $inParams){
+		print "Optional: " if isSetTrue($_,"Optional");
+		printf " %s(%s): ", $_->{Name}, $types{$_->{CIMTYPE}};
+		$input = <STDIN>;
+		$inParams->{$_->{Name}} = $input if ($input ne "");
+	}
+	$intRC = $class->ExecMethod_("Create", $inParams);
+}
+
+sub get_createby_method{
+	$Class = shift;
+	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
+    my $methodCreate = $Class->{Qualifiers_}->Item("CreateBy")->{Value};
+    return $Class->{Methods_}->Item($methodCreate);
+}
 
 # print_register("");
 # print_register("SYSTEM");
@@ -70,8 +101,8 @@ sub show_registry_branch{
 	}
 }
 
-#get_class_methods("Win32_Volume");
-sub get_class_methods{
+print_methods("Win32_Volume");
+sub print_methods{
 	my $Class =  shift ;
 	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
 	my $Methods = $Class->{Methods_};
@@ -264,7 +295,6 @@ sub get_instances_from_class{
 	return $Class->Instances_(wbemFlagUseAmendedQualifiers);
 }
 
-#todo replace this in lot of code
 sub get_class{
 	return $WbemServices->Get(shift,wbemFlagUseAmendedQualifiers);
 }
@@ -296,8 +326,10 @@ sub print_qualifier{
 
 #does object have qualifier + is it true?
 sub isSetTrue{
-  my ($Object,$prop)=@_;
-  return  $Object->{Qualifiers_}->Item($prop) && $Object->{Qualifiers_}->Item($prop)->{Value};
+	$Win32::OLE::Warn = 0;
+	my ($Object,$prop)=@_;
+	return  $Object->{Qualifiers_}->Item($prop) && $Object->{Qualifiers_}->Item($prop)->{Value};
+	$Win32::OLE::Warn = 3;
 }
 
 #show all subclasse
@@ -586,8 +618,8 @@ $excel->{visible} = 1;
 # excel_print_range_between_cells(1,1,4,3);
 #excel_update_cell(4,1,5);
 #excel_update_range(1,1,8,8,"Excelsior");
-excel_multiplication_table(100,20);
-print "Press ENTER to exit"; <STDIN>;
+#excel_multiplication_table(100,20);
+#print "Press ENTER to exit"; <STDIN>;
 #####################################
 
 sub excel_multiplication_table{
