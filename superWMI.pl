@@ -1,7 +1,4 @@
-####TODO VANAF OEF 31
-####TODO ADD EXCEL FILE TO THIS
-####MAKE SCRIPT THAT FIXES CODE $S --> $s
-####TODO SPLIT CODE IN MODULES
+####TODO 48+
 use warnings;
 use Win32::OLE 'in';
 use Win32::OLE::Variant;
@@ -12,11 +9,258 @@ my $namespace = "root/cimv2";
 my $Locator=Win32::OLE->new("WbemScripting.SWbemLocator");
 my $WbemServices = $Locator->ConnectServer($computername, $namespace);
 $Win32::OLE::Warn = 3;
+use File::Spec;
+open my $save_err, ">&STDERR";
+
+my $typeLib=Win32::OLE::Const->Load($WbemServices);
+my %cimtype;
+while ( ( $key, $value ) = each %{$typeLib} ) {
+	$cimtype{$value}=substr($key,11) if ($key=~/wbemCim/);
+}
+%wd = %{Win32::OLE::Const->Load($Locator)}; 
+
+my %types;
+while (($type,$nr)=each (%wd)){
+	if ($type=~/Cimtype/){
+	    $type=~s/wbemCimtype//g;
+	    $types{$nr}=$type;
+	}
+}
+
+###################################################################################
 
 
+
+
+# print_register("");
+# print_register("SYSTEM");
+# print_register("SYSTEM\\Currentcontrolset\\Services\\tcpip");
+sub print_register{
+	my $start = shift;
+	my %RootKey = ( HKEY_CLASSES_ROOT   => 0x80000000
+	              , HKEY_CURRENT_USER   => 0x80000001
+	              , HKEY_LOCAL_MACHINE  => 0x80000002
+	              , HKEY_USERS          => 0x80000003
+	              , HKEY_CURRENT_CONFIG => 0x80000005
+	              , HKEY_DYN_DATA       => 0x80000006 );
+
+	my $Registry = get_class("StdRegProv");
+
+	my $InParameters=$Registry->{Methods_}->{EnumKey}->{InParameters};
+	$InParameters->{Properties_}->Item(hDefKey)->{Value} = $RootKey{HKEY_LOCAL_MACHINE};
+
+	print "$start";
+	show_registry_branch($start,"",0,$Registry, $InParameters);
+}
+
+#use print_register method
+sub show_registry_branch{
+    my ($Key,$PrintNaam,$Level,$Registry,$InParameters)=@_;
+   
+    printf "%s%s\n",("\t" x $Level),$PrintNaam;
+
+    $InParameters->{Properties_}->Item(sSubKeyName)->{Value} = $Key;
+    my $EnumKeyOutParameters = $Registry->ExecMethod_(EnumKey,$InParameters);
+    return if $EnumKeyOutParameters->{ReturnValue};
+    if($EnumKeyOutParameters->{sNames}){
+	    foreach my $SubKey (sort {lc($b) cmp lc($b)} @{$EnumKeyOutParameters->{sNames}}) {
+	        my $Key = $Key.($Key ne "" ?"\\":"").$SubKey;
+	        show_registry_branch($Key,$SubKey,$Level+1,$Registry,$InParameters) if $SubKey ne "";
+	    }
+	}
+}
+
+#get_class_methods("Win32_Volume");
+sub get_class_methods{
+	my $Class =  shift ;
+	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
+	my $Methods = $Class->{Methods_};
+	printf "\n%s bevat %d methodes met volgende aanroep (en extra return-waarde):\n ", 
+	             $Class->{Path_}->{Class},$Methods->{Count};
+	foreach my $Method (sort {uc($a->{Name}) cmp uc($b->{Name})} in $Methods) {
+	    printf "\n\n\n------Methode %s ---(%s)-------------------- " ,$Method->{Name}, 
+	             $Method->{Qualifiers_}->{Count};
+	    foreach $qual (in $Method->{Qualifiers_}){    
+	        printf "\n%s: %s\n",$qual->{name},
+	                ref $qual->{value} eq "ARRAY" ? join " , ",@{$qual->{Value}} : $qual->{Value};
+	    }    
+	}
+}
+
+sub turn_off_errors{
+	open STDERR, '>', File::Spec->devnull() or die "could not open STDERR: $!\n";
+}
+
+sub turn_on_errors{
+	open STDERR, ">&", $save_err;
+}
+
+#print_disk_partition_info();
+sub print_disk_partition_info{
+	my $Class = get_class("Win32_LogicalDisk");
+
+	my @DriveType = @{$Class->Properties_(DriveType)->Qualifiers_(Values)->{Value}}; #onthouden 
+	my @MediaType_LogicalDrive = @{$Class->Properties_(MediaType)->Qualifiers_(Values)->{Value}}; #onthouden
+
+	$Class = get_class("Win32_DiskDrive");
+	my @Capabilities = @{$Class->Properties_(Capabilities)->Qualifiers_(Values)->{Value}};
+
+	# MediaType heeft zowel Values als ValueMap - mechanisme 
+	%MediaType_DiskDrive = make_property_hash("MediaType","Win32_DiskDrive");
+
+	my $Instances = get_instances_from_class("Win32_DiskPartition");
+
+	foreach $Instance (in $Instances) {
+	    printf "*************************************** %s: %s\n", "DeviceID", $Instance->{DeviceID};
+	    my $Properties = $Instance->{Properties_};
+
+	    defined $_->{Value}
+	       && printf "%s: %s\n",$_->{Name}, ref($_->{Value}) eq "ARRAY" ? join(",",@{$_->{Value}}) : $_->{Value}
+	            foreach in $Properties;
+
+	    print "\n";
+	    $Query="ASSOCIATORS OF {Win32_DiskPartition='$Instance->{DeviceID}'} 
+	            WHERE AssocClass=Win32_DiskDriveToDiskPartition";
+
+	    foreach $PhysicalDiskInstance (in $WbemServices->ExecQuery($Query)) {
+	        my $Properties = $PhysicalDiskInstance->{Properties_};  #haalt ook de waarden op
+	        foreach $Property (in $Properties) {
+	            if  ($Property->{Name} eq "Capabilities") {
+	            	printf "%s: %s\n",$Property->{Name}, join(",",map {$Capabilities[$_]} @{$Property->{Value}});
+	            }
+	            elsif  ($Property->{Name} eq "MediaType") {
+	                $value=$Property->{Value};
+	                $value=~s/[\t]/ /g;  #tab-teken in plaats van een spatie !!
+	             	printf "%s: (%s) %s\n", $Property->{Name},$Property->{Value},$MediaType_DiskDrive{$value};
+	           }
+	            else {
+	                printf "%s: %s\n", $Property->{Name}, 
+	                      ref( $Property->{Value} ) eq "ARRAY" ? join(",",@{$Property->{Value}}) : $Property->{Value}
+	                   if defined $Property->{Value};
+	            }
+	        }
+	    }
+
+	    print "\n";
+	    $Query="ASSOCIATORS OF {Win32_DiskPartition='$Instance->{DeviceID}'} 
+	               WHERE AssocClass=Win32_LogicalDiskToPartition";
+	    foreach $LogicalDiskInstance (in $WbemServices->ExecQuery($Query)) {
+	        my $Properties = $LogicalDiskInstance->{Properties_};   #haalt ook de waarden op
+	        foreach $Property (in $Properties) {
+	            if  ($Property->{Name} eq "DriveType") {
+	            	printf "%s: %s\n", $Property->{Name}, $DriveType[$Property->{Value}];
+
+	            }
+	            elsif  ($Property->{Name} eq "MediaType") {
+	            	printf "%s: %s\n", $Property->{Name}, $MediaType_LogicalDrive[$Property->{Value}];
+	            }
+	            else {
+	                printf "%s: %s\n", $Property->{Name}, 
+	                      ref( $Property->{Value} ) eq "ARRAY" ? join ",",@{$Property->{Value}} : $Property->{Value}
+	                   if defined $Property->{Value};
+	            }
+	        } 
+	    }
+	}
+}
+
+#print_network_adapter_info();
+sub print_network_adapter_info{
+	turn_off_errors();
+	#op klassen de hash initialiseren
+	%Availability        = make_property_hash("Availability","Win32_NetworkAdapter");
+	%NetConnectionStatus = make_property_hash("NetConnectionStatus","Win32_NetworkAdapter");
+
+	my $Query="SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionStatus>=0"; 
+	my $AdapterInstances = $WbemServices->Execquery($Query);   #(*)
+
+	foreach $AdapterInstance (sort {uc($a->{NetConnectionID}) cmp uc($b->{NetConnectionID})} in $AdapterInstances) {
+	    print "******************************************************** \n";
+	    printf "%s: %s\n", "Connection Name", $AdapterInstance->{NetConnectionID};
+
+	    printf "%s: %s\n", "Adapter name", $AdapterInstance->{Name};
+	    printf "%s: %s\n", "Device availability", $Availability{$AdapterInstance->{Availability}};
+	    printf "%s: %s\n", "Adapter type", $AdapterInstance->{AdapterType};
+	    printf "%s: %s\n", "Adapter state", $NetConnectionStatus{$AdapterInstance->{NetConnectionStatus}};
+	    printf "%s: %s\n", "MAC address", $AdapterInstance->{MACAddress};
+	    printf "%s: %s\n", "Adapter service name", $AdapterInstance->{ServiceName};
+	    printf "%s: %s\n", "Last reset", $AdapterInstance->{TimeOfLastReset};
+
+	    #Recource Informatie
+	    $Query="ASSOCIATORS OF {Win32_NetworkAdapter='$AdapterInstance->{Index}'} 
+	               WHERE AssocClass=Win32_AllocatedResource";
+	    my $AdapterResourceInstances = $WbemServices->ExecQuery ($Query);
+	    foreach $AdaptResInstance (in $AdapterResourceInstances) {
+	        my $className=$AdaptResInstance->{Path_}->{Class};
+	        printf "%s: %s\n", "IRQ resource", $AdaptResInstance->{IRQNumber} if $className eq "Win32_IRQResource";
+	        printf "%s: %s\n", "DMA channel", $AdaptResInstance->{DMAChannel} if $className eq "Win32_DMAChannel";
+	        printf "%s: %s\n", "I/O Port", $AdaptResInstance->{Caption}       if $className eq "Win32_PortResource";
+	        printf "%s: %s\n", "Memory address", $AdaptResInstance->{Caption} if $className eq "Win32_DeviceMemoryAddress";
+	    }
+
+	    my $AdapterInstance = $WbemServices->Get ("Win32_NetworkAdapterConfiguration=$AdapterInstance->{Index}");
+	    next unless $AdapterInstance->{IPEnabled};
+
+	    if ($AdapterInstance->{DHCPEnabled}) {
+	       printf "%s: %s\n", "DHCP expires", $AdapterInstance->{DHCPLeaseExpires};
+	       printf "%s: %s\n", "DHCP obtained", $AdapterInstance->{DHCPLeaseObtained};
+	       printf "%s: %s\n", "DHCP server", $AdapterInstance->{DHCPServer};
+	    }
+
+	    printf "%s: %s\n", "IP address(es)", (join ",",@{$AdapterInstance->{IPAddress}});
+	    printf "%s: %s\n", "IP mask(s)", (join ",",@{$AdapterInstance->{IPSubnet}});
+	    printf "%s: %s\n", "IP connection metric", $AdapterInstance->{IPConnectionMetric};
+	    printf "%s: %s\n", "Default Gateway(s)",(join ",",@{$AdapterInstance->{DefaultIPGateway}});
+	    printf "%s: %s\n", "Dead gateway detection enabled", $AdapterInstance->{DeadGWDetectEnabled};
+
+	    printf "%s: %s\n", "DNS registration enabled", $AdapterInstance->{DomainDNSRegistrationEnabled};
+	    printf "%s: %s\n", "DNS FULL registration enabled", $AdapterInstance->{FullDNSRegistrationEnabled};
+	    printf "%s: %s\n", "DNS search order", (join ",",@{$AdapterInstance->{DNSServerSearchOrder}});
+	    printf "%s: %s\n", "DNS domain", $AdapterInstance->{DNSDomain};
+	    printf "%s: %s\n", "DNS domain suffix search order",  (join ",",@{$AdapterInstance->{DNSDomainSuffixSearchOrder}});
+	    printf "%s: %s\n", "DNS enabled for WINS resolution", $AdapterInstance->{DNSEnabledForWINSResolution};
+	}
+	turn_on_errors();
+}
+
+#$class = get_class("Win32_LocalTime");
+#print property_info($class->{Properties_}->{Day});
+sub property_info{
+   $prop = shift;
+   $res  = $prop->{Name};
+   $cimtype = $prop->{Qualifiers_}->Item("CIMType")->{Value};
+   return $res."(".$cimtype.")";
+ }
+
+sub get_class_name{
+	my $class = shift;
+	return $class->{SystemProperties_}->{__CLASS}->{Value};
+}
+
+#print_class_attribute_qualifiers("Win32_LocalTime");
+sub print_class_attribute_qualifiers{
+	my $Class = shift; 
+	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
+
+	print "De Property Qualifiers van alle attributen van de klasse ",get_class_name($Class),"\n\n";
+	foreach my $prop (in $Class->{Properties_}){ #enkel de properties die specifiek zijn voor de klasse
+	    print_attribute_qualifiers($prop);
+	}
+}
+
+sub print_attribute_qualifiers{
+	my $prop = shift;
+	my $Qualifiers = $prop->{Qualifiers_};
+	    printf "\n\n%s",$prop->{Name};
+	    if ($Qualifiers->Item("CIMTYPE")){
+	        printf " (%s <->%s = %s)",$prop->{CIMType},$Qualifiers->Item("CIMTYPE")->{Value},$cimtype{$prop->{CIMType}};     #de attribuutqualifiers bevat een duidelijke naam voor het type
+	      }
+	    printf "\n   Qualifiers: %s", join(" ",map {$_->{Name}} in $Qualifiers);
+}
 
 sub get_instances_from_class{
 	my $Class = shift;
+	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
 	return $Class->Instances_(wbemFlagUseAmendedQualifiers);
 }
 
@@ -46,7 +290,7 @@ sub print_class_qualifiers_instance{
 sub print_qualifier{
 	my $Qualifier = shift;
 	my $waarde=$Qualifier->Value;
-		print "\t",$Qualifier->Name," (",ref($waarde) eq "ARRAY"  ? "Array=".join (",",@{$waarde}) : $waarde,")\n";
+	print "\t",$Qualifier->Name," (",ref($waarde) eq "ARRAY"  ? "Array=".join (",",@{$waarde}) : $waarde,")\n";
 }
 
 
@@ -160,16 +404,7 @@ sub print_attributes_from_class{
 	my $class = shift;
 	$class = get_class($class) if (ref($class) ne "Win32::OLE");
 	
-	%wd = %{Win32::OLE::Const->Load($Locator)}; 
-	my %types;
-	while (($type,$nr)=each (%wd)){
-	  	if ($type=~/Cimtype/){
-	    	$type=~s/wbemCimtype//g;
-	    	$types{$nr}=$type;
-	  	}
-	}
-
-	print  $class->{SystemProperties_}->{__CLASS}->{Value}," bevat ", $class->{Properties_}->{Count}," properties en ", 
+	print  get_class_name($class)," bevat ", $class->{Properties_}->{Count}," properties en ", 
 					     $class->{SystemProperties_}->{Count}," systemproperties : \n\n";
 
 	foreach my $prop (in $class->{Properties_}, $class->{SystemProperties_}){
@@ -242,8 +477,8 @@ sub change_service_state{
 	Win32::OLE->LastError()==0 || die Win32::OLE->LastError();
 	printf "%s is currently %s\n" ,$Instance->{DisplayName},$Instance->{State};
 	my $Methods = get_class($ClassName)->{Methods_};
-	my %StartServiceReturnValues=makeHash_method_qualifier($Methods->Item("StartService"));
-	my %StopServiceReturnValues=makeHash_method_qualifier($Methods->Item("StopService"));
+	my %StartServiceReturnValues=make_method_qualifier_hash($Methods->Item("StartService"));
+	my %StopServiceReturnValues=make_method_qualifier_hash($Methods->Item("StopService"));
 	if ( $action eq "start" ) {
 	   my $OutParameters = $Instance->ExecMethod_("StartService"); 
 	   my $intRC = $OutParameters->{ReturnValue};
@@ -278,7 +513,7 @@ sub create_process{
 	$process_name = shift;
 	my $class = get_class("Win32_Process");
 	my $methode = $class->{Methods_}->{"Create"};
-	my %CreateReturnValues=makeHash_method_qualifier($methode);
+	my %CreateReturnValues=make_method_qualifier_hash($methode);
 	my $MethodInParameters =$methode->{InParameters}; 
 	$MethodInParameters->{CommandLine}=$process_name;
 	my $MethodOutParameters=$class->ExecMethod_("Create",$MethodInParameters) ;   
@@ -299,7 +534,7 @@ sub destroy_process{
 	$processHandle = shift;
 	my $class = get_class("Win32_Process");
         my $method = $class->{Methods_}->{"Terminate"};
-	my %TerminateReturnValues=makeHash_method_qualifier($method);
+	my %TerminateReturnValues=make_method_qualifier_hash($method);
 	my $MethodInParameters =$method->{InParameters}; #Moeten echter niet ingevuld worden
 	my $relpad="Win32_Process.Handle=\"$processHandle\"";
 	my $object =  $WbemServices->get($relpad);
@@ -310,10 +545,184 @@ sub destroy_process{
 }
   
 #maps the ValueMap to the Values for a given method
-sub makeHash_method_qualifier{
+sub make_method_qualifier_hash{
 	my $Method=shift;
 	my %hash=();
 	@hash{@{$Method->Qualifiers_(ValueMap)->{Value}}} = @{$Method->Qualifiers_(Values)->{Value}};
 	return %hash;
 }
 
+#make hash from prop from class
+sub make_property_hash{
+	my ($prop,$Class)=@_;
+	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
+	my $Qualifiers = $Class->Properties_($prop)->{Qualifiers_};
+	my %hash=();
+	@hash{@{$Qualifiers->Item("ValueMap")->{Value}}} = @{$Qualifiers->Item("Values")->{Value}};
+	return %hash;
+}
+
+
+# EXCEL ###########################################################################################################
+
+
+#initialisation
+#@ARGV or die "give 1 argument: filename";
+my $filename = $ARGV[0];
+$filename = 'default.xls' if(!$filename);
+$fso = Win32::OLE->new("Scripting.FileSystemObject");
+$excel = Win32::OLE->GetActiveObject('Excel.Application') || Win32::OLE->new('Excel.Application', 'Quit');
+$excel->{DisplayAlerts}=0;
+$excel->{visible} = 1; 
+
+#Main
+#####################################
+#$book = excel_open_file($filename);
+# excel_print "\n Amount of cells:", get_amount_cells(), "\n";
+# excel_print_empty_first_rows();
+# excel_print_all_content_sheets();
+# excel_print_specific_range("A1:D10");
+# excel_print_cell(4,1);
+# excel_print_range_between_cells(1,1,4,3);
+#excel_update_cell(4,1,5);
+#excel_update_range(1,1,8,8,"Excelsior");
+excel_multiplication_table(100,20);
+print "Press ENTER to exit"; <STDIN>;
+#####################################
+
+sub excel_multiplication_table{
+	my ($row_amount, $column_amount) = splice @_, 0,2;
+	my $book = excel_open_file("voud.xlsx");
+	my $sheet = $book->Worksheets(1);
+	$sheet->{name} = "Tables from 2 to 10";
+	my $range = $sheet->Range($sheet->Cells(1,1),$sheet->Cells($row_amount, $column_amount));
+	my $mat = $range->{Value};
+	my $number=1;
+	foreach my $row (@$mat) {
+		$multiple=2;
+		foreach (@$row){
+			$_ = $number * $multiple; #writes to @$mat
+			$multiple++;
+		}
+		$number++;
+	}
+	$range->{Value} = $mat;
+	excel_add_table_lines($range);
+}
+
+sub excel_add_table_lines{
+	my $range = shift;
+	$range->Rows(1)->{font}->{bold} = 1;
+	%constanten = %{Win32::OLE::Const->Load($excel)}; 
+	$range->Borders($constanten{xlInsideVertical})->{LineStyle} = $constanten{xlContinuous}; 
+	$range->Borders($constanten{xlEdgeRight})->{LineStyle} = $constanten{xlContinuous};
+	$range->Borders($constanten{xlEdgeLeft})->{LineStyle} = $constanten{xlContinuous};
+	$range->rows(1)->Borders($constanten{xlEdgeBottom})->{LineStyle} = $constanten{xlContinuous};
+}
+
+sub excel_update_cell{
+	my ($row, $col, $value) = splice @_, 0,3 ;
+	my $sheet = $book->Worksheets(1);
+	my $range = $sheet->Cells($row,$col);
+	$range->{Value}=20;
+	excel_save();
+}
+
+sub excel_update_range{
+	my ($row1,$col1,$row2,$col2,$value)=splice @_, 0,5 ;
+	my $sheet = $book->Worksheets(1);
+	for ($i=0;$i<$row2;$i++){#todo won't work if row1/col1 isn't 1,1
+		for ($j=0; $j < $col2; $j++) {
+			$mat->[$i][$j]=$value;
+		}
+	}
+	$sheet->Range($sheet->Cells($row1,$col1),$sheet->Cells($row2,$col2))->{Value}=$mat;
+	excel_save();
+}
+
+sub excel_save{
+	$book->Save();
+}
+
+sub excel_get_start_next_row{
+	my $last_cell = shift;
+	$last_cell =~ s/\D//g; #digit only
+	$last_cell++;
+	return "A".$last_cell;	
+}
+
+sub excel_print_range_between_cells{
+	my ($row1,$col1,$row2,$col2)=splice @_, 0,4 ;
+	my $sheet = $book->Worksheets(1);
+	my $range = $sheet->Range($sheet->Cells($row1,$col1),$sheet->Cells($row2, $col2));
+	excel_print_range($range);
+}
+
+sub excel_print_cell{
+	my ($row, $col) = splice @_, 0,2 ;
+	my $sheet = $book->Worksheets(1);
+	my $range = $sheet->Cells($row, $col);
+	excel_print_range($range);
+}
+
+sub excel_print_specific_range{
+	my $selected = shift;
+	my $sheet = $book->Worksheets(1);
+	my $range = $sheet->Range($selected);
+	excel_print_range($range);
+}
+
+sub excel_print_content_all_sheets{
+	foreach $nsheet (in $book->{Worksheets}){
+	    print "\n$nsheet->{name}\n";
+	    $range=$nsheet->{UsedRange};#filled cells
+	    excel_print_range($range);
+	}
+}
+
+sub excel_print_range{
+	my $range = shift;
+	my $mat = $range->{Value};
+	if (ref $mat) { #multiple values
+		print "\nmatrix with $range->{rows}->{Count} rows and $range->{columns}->{Count} columns\n";
+		print join("  \t",@{$_}),"\n" foreach @{$mat};#double loop
+	}
+	else { #single value or empty
+		($mat ? print "\n1 content : $mat\n": print "empty\n");
+	}
+	print "\n-----------------------------------------\n";
+}
+
+sub excel_print_empty_first_rows{
+	foreach $nsheet (in $book->{Worksheets}){
+		my $cell = $nsheet->Range("A1")->SpecialCells(xlCellTypeLastCell);
+		my $range = $nsheet->Range("A1",$cell);
+		printf "\n\t%-30s has %3d columns and %3d rows\n",$nsheet->{name},$range->{columns}->{count},$range->{rows}->{count} ;
+	}
+}
+
+sub excel_get_amount_cells{
+	my $sheet = $book->Worksheets(1);
+	my $range_obj = $sheet->UsedRange();
+	return $range_obj->{Count};
+}
+
+sub excel_get_amount_of_worksheets{
+	print $book->Worksheets->{Count};
+}
+
+sub excel_open_file{
+	my $filename = shift;
+	my $book;
+	if ($fso->FileExists($filename)) {
+		my $path = $fso->GetAbsolutePathName($filename);
+		$book=$excel->{Workbooks}->Open($path); 
+	}
+	else {
+	    my $dir = $fso->GetAbsolutePathName("."); 
+	    my $path = $dir."\\".$filename;            
+	    $book = $excel->{Workbooks}->Add();   
+	    $book->SaveAs($path);                 
+	}
+	return $book;
+}
