@@ -1,6 +1,8 @@
-####TODO 48+
+####TODO 56+
 use warnings;
 use Win32::OLE 'in';
+use Win32::OLE qw(EVENTS);
+use Win32::Console;
 use Win32::OLE::Variant;
 use Win32::OLE::Const 'Microsoft WMI Scripting ';
 use Math::BigInt;
@@ -27,9 +29,147 @@ while (($type,$nr)=each (%wd)){
 	}
 }
 
-###################################################################################
+if(@ARGV){
+	handle_input();
+}
+#sync monitoring###############################################################################
+#monitor all services on the pc
+sub watch_services{
+	$Win32::OLE::Warn = 0;
+	my $notif_query = "SELECT * FROM __InstanceModificationEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_Service'";
+	my $event_notif = $WbemServices->ExecNotificationQuery($notif_query);
+	$|=1;
+	print "Waiting for events: ";
+	while(1){
+		my $event = $event_notif->NextEvent(5000);
+		Win32::OLE->LastError() and print "." or printf "\n%s changed from %s to %s\n"
+			,$event->{TargetInstance}->{DisplayName}
+			,$event->{PreviousInstance}->{State}
+			,$event->{TargetInstance}->{State};
+	}
+	$Win32::OLE::Warn = 3;
+}
+
+sub watch_service{
+	print "ToDo";
+}
+
+sub watch_processes{
+	my $query  =  "SELECT * FROM __InstanceOperationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process' ";
+	my $EventSource = $WbemServices->ExecNotificationQuery($query);
+	print "Watching processes:\n";
+	while (1) {
+	    my $Event = $EventSource->NextEvent();
+	    my $className=$Event->{Path_}->{Class};
+	    next if  $className eq "__InstanceModificationEvent";   #enkel aanpassingen worden niet opgevolgd
+	    printf "Process %-29s (%s)started \n", $Event->{TargetInstance}->{Name}, 
+	                  $Event->{TargetInstance}->{Handle} if  $className eq "__InstanceCreationEvent";
+	    printf "Process %-29s (%s)stopped \n", $Event->{TargetInstance}->{Name},
+	                  $Event->{TargetInstance}->{Handle} if  $className eq "__InstanceDeletionEvent";
+	}
+}
+
+sub watch_process{
+	print "ToDo";
+}
+#async monitoring######################################################################
+#console werkt niet
+sub watch_processes_async{
+	my $Sink = Win32::OLE->new ('WbemScripting.SWbemSink');
+	Win32::OLE->WithEvents($Sink,\&EventCallBack);  #koppel de gewenste methode aan dit object
+
+	my $Query1 = "SELECT * FROM __InstanceOperationEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_Process'";
+	$WbemServices->ExecNotificationQueryAsync($Sink, $Query1); 
+
+	my $Console  = new Win32::Console(STD_INPUT_HANDLE);  #creeert een nieuw Console object
+	$Console->Mode( ENABLE_PROCESSED_INPUT);    #enkel reageren op toetsen, niet op muis-bewegingen
+
+	until ($Console->Input()) {   #zolang er geen input is
+	 	Win32::OLE->SpinMessageLoop();
+		Win32::Sleep(500);
+	}
+
+	$Sink->Cancel();
+	Win32::OLE->WithEvents($Sink); #geen afhandeling meer bij dit SinkObject
+}
+
+#methode die de events afhandelt
+sub EventCallBack(){
+	my ($Source,$EventName,$Event,$Context) = @_;
+	return unless $EventName eq "OnObjectReady";
+	my $className=$Event->{Path_}->{Class};
+	return if  $className eq "__InstanceModificationEvent";
+	    
+	if ($Event->{TargetInstance}->{Path_}->{Class} eq "Win32_Process") {
+	    printf "%-29s started\n", $Event->{TargetInstance}->{Name} if  $className eq "__InstanceCreationEvent";
+	    printf "%-29s stopped\n", $Event->{TargetInstance}->{Name} if  $className eq "__InstanceDeletionEvent";
+	} else {
+	    printf "%-29s %s\n", $Event->{TargetInstance}->{Path_}->{Class}, $Event->{TargetInstance}->{Path};
+	}
+}
 
 
+
+
+#general###############################################################################
+sub handle_input{
+	$method = shift @ARGV;
+	&$method(@ARGV);
+}
+
+#only works in admin mode
+sub create_environment_variable{
+	my ($name, $value) = @_;
+	my $class = $WbemServices->Get("Win32_Environment");
+	my $instance = $class->SpawnInstance_(); #static method
+	$instance->{Username} = "<SYSTEM>";
+	$instance->{SystemVariable} = 1;
+	$instance->{Name} = $name;
+	$instance->{VariableValue} = $value;
+	my $new_instance_path = $instance->Put_();
+	print "Succes!\n" unless Win32::OLE->LastError();
+	print "Return = ", $new_instance_path->{Path}, "\n";
+	print "Return = ", $new_instance_path->{RelPath},"\n";
+}
+
+sub delete_environment_variable{
+	my $name = shift; 
+	$WbemServices->Get("Win32_Environment.UserName='<SYSTEM>',Name='$name'")->Delete_;
+}
+
+# sub temp{
+# 	my $class = get_class("Win32_Process");
+# 	my @methods = in $class->{Methods_};
+# 	foreach $met (@methods){
+# 		if($met->{InParameters}){
+# 			foreach $prop (in $met->{OutParameters}->{properties_}){
+# 				print $prop->{Name},"\n";
+# 			}
+# 		}
+
+# 	}
+# }
+
+# sub temp2{
+# 	my $class = get_class("Win32_Process");
+# 	my @instances = in get_instances_from_class($class);
+# 	my $i = $instances[0];
+# 	print $i->{Properties_}->{Caption}->{Value};
+# 	print "\n\n";
+# 	print $i->{Caption};
+# }
+
+# sub temp3{
+# 	my $class = get_class("Win32_Process");
+# 	my $instances = get_instances_from_class($class);
+# 	foreach $in (in $instances){
+# 		my $props = $in->{Properties_};
+# 		foreach $p (in $props){
+# 			print $p->{Name};
+# 		}
+# 		print "\n";
+# 	}
+# }
 
 sub print_method_input_parameters{
 	my $method = shift;
@@ -51,6 +191,7 @@ sub create_object{
 		print "Optional: " if isSetTrue($_,"Optional");
 		printf " %s(%s): ", $_->{Name}, $types{$_->{CIMTYPE}};
 		$input = <STDIN>;
+		chomp $input;
 		$inParams->{$_->{Name}} = $input if ($input ne "");
 	}
 	$intRC = $class->ExecMethod_("Create", $inParams);
@@ -101,7 +242,7 @@ sub show_registry_branch{
 	}
 }
 
-print_methods("Win32_Volume");
+#print_methods("Win32_Volume");
 sub print_methods{
 	my $Class =  shift ;
 	$Class = get_class($Class) if (ref($Class) ne "Win32::OLE");
@@ -263,6 +404,7 @@ sub property_info{
    return $res."(".$cimtype.")";
  }
 
+#print get_class_name(get_class("Win32_Directory"));
 sub get_class_name{
 	my $class = shift;
 	return $class->{SystemProperties_}->{__CLASS}->{Value};
@@ -600,13 +742,13 @@ sub make_property_hash{
 
 #initialisation
 #@ARGV or die "give 1 argument: filename";
-my $filename = $ARGV[0];
-$filename = 'default.xls' if(!$filename);
-$fso = Win32::OLE->new("Scripting.FileSystemObject");
-$excel = Win32::OLE->GetActiveObject('Excel.Application') || Win32::OLE->new('Excel.Application', 'Quit');
-$excel->{DisplayAlerts}=0;
-$excel->{visible} = 1; 
+# my $filename = $ARGV[0];
+# $filename = 'default.xls' if(!$filename);
+# $fso = Win32::OLE->new("Scripting.FileSystemObject");
 
+# $excel = Win32::OLE->GetActiveObject('Excel.Application') || Win32::OLE->new('Excel.Application', 'Quit');
+# $excel->{DisplayAlerts}=0;
+# $excel->{visible} = 1; 
 #Main
 #####################################
 #$book = excel_open_file($filename);
