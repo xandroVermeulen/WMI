@@ -1,4 +1,4 @@
-####TODO 56+
+####TODO cim_managedsystemelemnt bevat coole klasses. vooral in logicalelement>logicaldevice
 use warnings;
 use Win32::OLE 'in';
 use Win32::OLE qw(EVENTS);
@@ -32,7 +32,140 @@ while (($type,$nr)=each (%wd)){
 if(@ARGV){
 	handle_input();
 }
-#sync monitoring###############################################################################
+##permanent eventregistration (only works on windows server)#################################################################
+
+#time in ms
+sub create_interval_timer{
+	my ($name, $time) = @_;
+	my $Instance = $WbemServices->Get("__IntervalTimerInstruction")->SpawnInstance_();
+	$Instance->{TimerID}  = $name;
+	$Instance->{IntervalBetweenEvents} = $time;
+	$instancePath=$Instance->Put_(wbemFlagUseAmendedQualifiers);
+	return $instancePath;
+}
+#timestring ex: 09/11/2018 11:00:00
+sub create_oneshot_timer{
+	#of op bepaald moment 1x triggeren
+	my ($name, $time_string) = @_;
+	my $DateTime = Win32::OLE->new("WbemScripting.SWbemDateTime");
+	$Instance = $WbemServices->Get("__AbsoluteTimerInstruction")->SpawnInstance_();
+	$Instance->{TimerID}  = $name;
+	$DateTime->SetVardate($time_string);
+	$Instance->{EventDateTime} = $DateTime->{Value};
+	$instancePath=$Instance->Put_(wbemFlagUseAmendedQualifiers);
+	return $instancePath;
+}
+ 
+sub create_event_filter{
+	my ($name, $timer_id, $query) = @_;
+	my $InstanceEvent = $WbemServices->Get("__EventFilter")->SpawnInstance_();
+	$InstanceEvent->{Name}=$name;
+	$InstanceEvent->{QueryLanguage} = "WQL";
+	if($query){
+		$InstanceEvent->{Query} = $query;
+	} else {
+		$InstanceEvent->{Query} = "SELECT * FROM __TimerEvent where TimerID = '".$timer_id."'";
+	}
+	$Filter = $InstanceEvent->Put_(wbemFlagUseAmendedQualifiers);
+	return $Filter->{path};
+}
+
+
+
+#message = "timer wordt gelogd op tijdstip %TIME_CREATED% op toestel %__SERVER%";
+sub create_commandline_event_consumer{
+	my ($name, $message) = @_;
+	my $InstanceReaction = $WbemServices->Get("CommandLineEventConsumer")->SpawnInstance_();
+	$InstanceReaction->{Name}=$name;
+	$InstanceReaction->{CommandLineTemplate} =  "msg console /Time:5 ".$message;
+	$Consumer = $InstanceReaction->Put_(wbemFlagUseAmendedQualifiers);
+	return $Consumer->{path};  
+}
+# filename = 'C:\\\\temp\\log.txt'
+sub create_logfile_event_consumer{
+	my ($name, $filename, $message) = @_;
+	my $InstanceReaction= $WbemServices->Get("LogFileEventConsumer")->SpawnInstance_();
+	$InstanceReaction->{Name}=$name;
+	$InstanceReaction->{FileName} = $filename;
+	$InstanceReaction->{Text} = "timer wordt gelogd op tijdstip $message";
+	$Consumer = $InstanceReaction->Put_(wbemFlagUseAmendedQualifiers);
+	return $Consumer->{path};  
+}
+
+sub create_smptpmail_event_consumer{
+	my ($name, $from, $to, $subject, $server) = @_;
+	my $InstanceReaction= $WbemServices->Get("SMTPEventConsumer")->SpawnInstance_();
+	$InstanceReaction->{Name}=$name;
+	$InstanceReaction->{FromLine}=$from;
+	$InstanceReaction->{ToLine}=$to;
+	$InstanceReaction->{Subject}=$subject;
+	$InstanceReaction->{SMTPServer}=$server;
+	$Consumer = $InstanceReaction->Put_(wbemFlagUseAmendedQualifiers);
+	return $Consumer->{path};  
+}
+
+# ToDO
+# sub create_NTEventLog_event_consumer{
+# 	my $InstanceReactie3= $WbemServices->Get("NTEventLogEventConsumer")->SpawnInstance_();
+
+# 	$InstanceReactie3->{Name}="test";
+# 	$InstanceReactie3->{SourceName} = "WinMgmt";
+# 	$InstanceReactie3->{EventType} = 0;
+# 	$InstanceReactie3->{EventID} = 2017;#0xC0000A;
+# 	$InstanceReactie3->{NumberOfInsertionStrings} = 1;
+# 	$InstanceReactie3->{Category} = 0;
+# 	$InstanceReactie3->{InsertionStringTemplates }=[$melding];  #als array doorgeven
+
+# 	$Consumer = $InstanceReactie3->Put_(wbemFlagUseAmendedQualifiers);
+# 	return $Consumer->{path};  
+# }
+
+sub create_filter_to_consumer_binding{
+	my ($filterpath, $consumerpath) = @_;
+	my $InstanceCoupling = $WbemServices->Get("__FilterToConsumerBinding")->SpawnInstance_();
+	$InstanceCoupling->{Filter}   = $filterpath; 
+	$InstanceCoupling->{Consumer} = $consumerpath;
+	$Result=$InstanceCoupling->Put_(wbemFlagUseAmendedQualifiers);
+	print "\n1.\n",$Result->{Path},"\n";
+	return $Result;
+}
+#create_event_registration("name", "interval", 6000, "logfile", "timer wordt gelogd op tijdstip %TIME_CREATED% op toestel %__SERVER%", 'C:\\\\temp\\log.txt');
+sub create_event_registration{
+	my ($name, $timertype, $time, $consumertype, $message, $filename) = @_;
+	my ($timerpath, $consumerpath, $filterpath, $result);
+
+	$timerpath = create_interval_timer($name, $time) if($timertype eq "interval");
+	$timerpath = create_oneshot_timer($name, $time) if($timertype eq "oneshot");
+
+	$filterpath = create_event_filter($name."_filter", $name);
+
+	$consumerpath = create_commandline_event_consumer($name, $message) if($consumertype eq "commandline");
+	$consumerpath = create_logfile_event_consumer($name, $message, $filename) if($consumertype eq "logfile");
+	
+	$result = create_filter_to_consumer_binding($filterpath, $consumerpath);
+}
+
+sub delete_all_event_registration_objects{
+	my $allInstances = $WbemServices->InstancesOf("__IndicationRelated");
+	print $allInstances->{Count}," instanties worden nu verwijderd\n";
+	$_->Delete_() foreach in $allInstances;
+	print Win32::OLE->LastError();
+}
+
+sub temp_method_ex59{
+	$filterp = create_event_filter("test2", undef, "SELECT * FROM __InstanceCreationEvent 
+	                     WITHIN 10 
+	                     WHERE TargetInstance ISA 'Win32_Process' 
+	                     AND (TargetInstance.Name = 'notepad.exe'
+	                     OR  TargetInstance.Name = 'calc.exe')");
+
+	$cpath = create_smptpmail_event_consumer(
+		"test2", "marlemen.denert\@ugent.be", "marlemen.denert\@ugent.be",
+		"%TargetInstance.Caption% started on %TargetInstance.__SERVER%", "smtp.ugent.be");
+	create_filter_to_consumer_binding($filterp, $cpath);
+}
+
+#sync monitoring#######################################################################################################################
 #monitor all services on the pc
 sub watch_services{
 	$Win32::OLE::Warn = 0;
@@ -59,7 +192,7 @@ sub watch_processes{
 	my $EventSource = $WbemServices->ExecNotificationQuery($query);
 	print "Watching processes:\n";
 	while (1) {
-	    my $Event = $EventSource->NextEvent();
+	    my $Event = $EventSource->NextEvent(4000);
 	    my $className=$Event->{Path_}->{Class};
 	    next if  $className eq "__InstanceModificationEvent";   #enkel aanpassingen worden niet opgevolgd
 	    printf "Process %-29s (%s)started \n", $Event->{TargetInstance}->{Name}, 
@@ -112,6 +245,33 @@ sub EventCallBack(){
 
 
 #general###############################################################################
+sub show_usb_devices{
+	my $Query = 'select * from Win32_USBControllerDevice';
+	my $Instances = $WbemServices->ExecQuery($Query);
+	print_attributes_from_instances($Instances);
+}
+
+sub say_out_loud{
+	my ($message) = @_;
+	my $tts = Win32::OLE->new("SAPI.SpVoice");
+	$tts->Speak($message);
+} 
+
+sub show_files_current_directory{
+	show_files_directory(".");
+}
+
+sub show_files_directory{
+	my ($name) = @_;
+	my $fso = Win32::OLE->new("Scripting.FileSystemObject");
+	my $folder = $fso->getFolder($name);
+	foreach (in $folder->{Files}){
+		printf "%-20s: %s\n", $_->{Name}, $_->{Type};
+	}
+}
+
+
+
 sub handle_input{
 	$method = shift @ARGV;
 	&$method(@ARGV);
@@ -120,7 +280,7 @@ sub handle_input{
 #only works in admin mode
 sub create_environment_variable{
 	my ($name, $value) = @_;
-	my $class = $WbemServices->Get("Win32_Environment");
+	my $class = get_class("Win32_Environment");
 	my $instance = $class->SpawnInstance_(); #static method
 	$instance->{Username} = "<SYSTEM>";
 	$instance->{SystemVariable} = 1;
@@ -557,7 +717,11 @@ sub print_computer_power_logs{
 sub print_attributes_from_class_instances{
 	my $class = shift;
 	$class = get_class($class) if (ref($class) ne "Win32::OLE");
-	my $instances = get_instances_from_class($class);
+	print_attributes_from_instances(get_instances_from_class($class));
+}
+
+sub print_attributes_from_instances{
+	my $instances = shift;
 	print $instances->{Count} , " exempla(a)r(en) \n"; #er zal maar 1 exemplaar zijn
 	foreach my $instance (in $instances){
 		print "\n\nInstance:\n\n";
@@ -569,7 +733,6 @@ sub print_attributes_from_class_instances{
 		    }
 		}
 	}
-
 }
 
 #print the attributes from the class with the given name 
@@ -765,7 +928,7 @@ sub make_property_hash{
 #####################################
 
 sub excel_multiplication_table{
-	my ($row_amount, $column_amount) = splice @_, 0,2;
+	my ($row_amount, $column_amount) = @_;
 	my $book = excel_open_file("voud.xlsx");
 	my $sheet = $book->Worksheets(1);
 	$sheet->{name} = "Tables from 2 to 10";
@@ -795,7 +958,7 @@ sub excel_add_table_lines{
 }
 
 sub excel_update_cell{
-	my ($row, $col, $value) = splice @_, 0,3 ;
+	my ($row, $col, $value) = @_;
 	my $sheet = $book->Worksheets(1);
 	my $range = $sheet->Cells($row,$col);
 	$range->{Value}=20;
@@ -803,7 +966,7 @@ sub excel_update_cell{
 }
 
 sub excel_update_range{
-	my ($row1,$col1,$row2,$col2,$value)=splice @_, 0,5 ;
+	my ($row1,$col1,$row2,$col2,$value) = @_;
 	my $sheet = $book->Worksheets(1);
 	for ($i=0;$i<$row2;$i++){#todo won't work if row1/col1 isn't 1,1
 		for ($j=0; $j < $col2; $j++) {
@@ -826,14 +989,14 @@ sub excel_get_start_next_row{
 }
 
 sub excel_print_range_between_cells{
-	my ($row1,$col1,$row2,$col2)=splice @_, 0,4 ;
+	my ($row1,$col1,$row2,$col2)= @_;
 	my $sheet = $book->Worksheets(1);
 	my $range = $sheet->Range($sheet->Cells($row1,$col1),$sheet->Cells($row2, $col2));
 	excel_print_range($range);
 }
 
 sub excel_print_cell{
-	my ($row, $col) = splice @_, 0,2 ;
+	my ($row, $col) = @_;
 	my $sheet = $book->Worksheets(1);
 	my $range = $sheet->Cells($row, $col);
 	excel_print_range($range);
