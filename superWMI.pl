@@ -1,7 +1,6 @@
 ####TODO cim_managedsystemelemnt bevat coole klasses. vooral in logicalelement>logicaldevice
 use warnings;
-use Win32::OLE 'in';
-use Win32::OLE qw(EVENTS);
+use Win32::OLE qw(EVENTS in);
 use Win32::Console;
 use Win32::OLE::Variant;
 use Win32::OLE::Const 'Microsoft WMI Scripting ';
@@ -32,6 +31,32 @@ while (($type,$nr)=each (%wd)){
 if(@ARGV){
 	handle_input();
 }
+###### examenvraag
+
+sub thread_monitoring{
+	excel_init();
+	my $book = excel_open_file("threads.xlsx");
+	my %threadCount=();
+	foreach $proc (in $WbemServices->ExecQuery("select * from Win32_Process")){
+		my $threads = $WbemServices->ExecQuery("select * from Win32_Thread where ProcessHandle = ".$proc->{Handle});
+		$threadCount{$proc->{Name}} += $threads->{count};
+	}
+	my $sheet = $book->Sheets(1);
+	my $mat;
+	my $counter=1;
+	while (($key,$value) = each(%threadCount)){
+		$mat->[$counter][0] = $key;
+		$mat->[$counter][1] = $value;
+		$counter++;
+	}
+	my $range = $sheet->Range("A1:B".$counter);
+	$range->{Value} = $mat;
+	print "Press ENTER to exit"; <STDIN>;
+}
+
+
+
+
 ##permanent eventregistration (only works on windows server)#################################################################
 
 #time in ms
@@ -104,21 +129,7 @@ sub create_smptpmail_event_consumer{
 	return $Consumer->{path};  
 }
 
-# ToDO
-# sub create_NTEventLog_event_consumer{
-# 	my $InstanceReactie3= $WbemServices->Get("NTEventLogEventConsumer")->SpawnInstance_();
 
-# 	$InstanceReactie3->{Name}="test";
-# 	$InstanceReactie3->{SourceName} = "WinMgmt";
-# 	$InstanceReactie3->{EventType} = 0;
-# 	$InstanceReactie3->{EventID} = 2017;#0xC0000A;
-# 	$InstanceReactie3->{NumberOfInsertionStrings} = 1;
-# 	$InstanceReactie3->{Category} = 0;
-# 	$InstanceReactie3->{InsertionStringTemplates }=[$melding];  #als array doorgeven
-
-# 	$Consumer = $InstanceReactie3->Put_(wbemFlagUseAmendedQualifiers);
-# 	return $Consumer->{path};  
-# }
 
 sub create_filter_to_consumer_binding{
 	my ($filterpath, $consumerpath) = @_;
@@ -926,6 +937,13 @@ sub make_property_hash{
 #excel_multiplication_table(100,20);
 #print "Press ENTER to exit"; <STDIN>;
 #####################################
+my ($excel, $fso);
+sub excel_init{
+	$excel = Win32::OLE->GetActiveObject('Excel.Application') || Win32::OLE->new('Excel.Application', 'Quit');
+	$excel->{DisplayAlerts}=0;
+	$excel->{visible} = 1; 
+	$fso = Win32::OLE->new("Scripting.FileSystemObject");
+}
 
 sub excel_multiplication_table{
 	my ($row_amount, $column_amount) = @_;
