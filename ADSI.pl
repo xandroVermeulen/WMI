@@ -1,23 +1,410 @@
 #Todo vanaf reeks7.17
+#Todo vanaf reeks8.14
+#init
 use Win32::OLE qw(EVENTS in);
 use Win32::OLE::Const "Active DS Type Library";
+use Math::BigInt;
 $Win32::OLE::WARN = 1;
 use Win32::OLE::Variant;
 my $connection = make_connection();
 my $RootObj = bind_object('RootDSE');
 $RootObj->getInfo();
-my $domein = $RootObj->{defaultNamingContext};
-
 my $input;
+my $domein = $RootObj->{defaultNamingContext};
+my %E_ADS = (
+    BAD_PATHNAME            => Win32::OLE::HRESULT(0x80005000),
+    UNKNOWN_OBJECT          => Win32::OLE::HRESULT(0x80005004),
+    PROPERTY_NOT_SET        => Win32::OLE::HRESULT(0x80005005),
+    PROPERTY_INVALID        => Win32::OLE::HRESULT(0x80005007),
+    BAD_PARAMETER           => Win32::OLE::HRESULT(0x80005008),
+    OBJECT_UNBOUND          => Win32::OLE::HRESULT(0x80005009),
+    PROPERTY_MODIFIED       => Win32::OLE::HRESULT(0x8000500B),
+    OBJECT_EXISTS           => Win32::OLE::HRESULT(0x8000500E),
+    SCHEMA_VIOLATION        => Win32::OLE::HRESULT(0x8000500F),
+    COLUMN_NOT_SET          => Win32::OLE::HRESULT(0x80005010),
+    ERRORSOCCURRED          => Win32::OLE::HRESULT(0x00005011),
+    NOMORE_ROWS             => Win32::OLE::HRESULT(0x00005012),
+    NOMORE_COLUMNS          => Win32::OLE::HRESULT(0x00005013),
+    INVALID_FILTER          => Win32::OLE::HRESULT(0x80005014),
+    INVALID_DOMAIN_OBJECT   => Win32::OLE::HRESULT(0x80005001),
+    INVALID_USER_OBJECT     => Win32::OLE::HRESULT(0x80005002),
+    INVALID_COMPUTER_OBJECT => Win32::OLE::HRESULT(0x80005003),
+    PROPERTY_NOT_SUPPORTED  => Win32::OLE::HRESULT(0x80005006),
+    PROPERTY_NOT_MODIFIED   => Win32::OLE::HRESULT(0x8000500A),
+    CANT_CONVERT_DATATYPE   => Win32::OLE::HRESULT(0x8000500C),
+    PROPERTY_NOT_FOUND      => Win32::OLE::HRESULT(0x8000500D)
+);
+#input
 if(@ARGV){
 	handle_input2();
 }
-# while($input ne "q"){
-# 	print "\nNext operation?:";
-# 	my $input = <STDIN>;
-# 	chomp $input;
-# 	handle_input($input) if $input ne "q";
-# }
+my $multi_input_enabled = 0;
+if($multi_input_enabled){
+	while($input ne "q"){
+		print "\nNext operation?:";
+		my $input = <STDIN>;
+		chomp $input;
+		handle_input($input) if $input ne "q";
+	}	
+}
+
+#only lab
+sub delete_container{
+	my $ou_naam=shift;
+	my $ou=bind_object("ou=".$ou_naam.",ou=labo,".$domein);
+	$ou->{Filter} = ["organizationalUnit"];  #enkel in de organizational unit wissen
+	foreach (in $ou) {
+	    delete_sub_containers($_);                      #wis alles in de container
+	    print $_->{adspath}. " wissen ok (j=ja) ?\n"; #container zelf wissen
+	    chomp($antw=<STDIN>);
+	    if ($antw eq "j") {
+	        $ou->delete ($_->{class},$_->{name});
+	        if (Win32::OLE->LastError eq 0) {    
+	        	print  $_->{adspath}," wordt gewist\n";
+	    	} else {
+	        	print Win32::OLE->LastError,"\n";
+	    	}
+	  	}
+	}
+}
+#only lab
+sub delete_sub_containers{
+    my $cont=shift;
+    foreach (in $cont){
+        print $_->{adspath}. " wissen ok (j=ja) ?\n";
+        chomp($antw=<STDIN>);
+        if ($antw eq "j"){
+            delete_sub_container($_);
+            $cont->delete ($_->{class},$_->{name});
+            if (Win32::OLE->LastError eq 0) {    
+            	print  $_->{adspath}," wordt gewist\n";
+            } else {
+            	print Win32::OLE->LastError,"\n";
+            }
+     	}
+   	}
+}
+
+#only lab
+sub add_users_to_group{
+	my $cont=bind_object("ou=...,ou=...,ou=labo,".$domein); #vul aan
+	my $groep = bind_object("cn=...,ou=...,ou=...,ou=labo,".$domein);  #vul aan
+    $cont->{filter}=[user];
+
+    foreach (in $cont) { 
+        push @leden ,$_->{distinguishedName};
+    }
+
+   $groep->PutEx(ADS_PROPERTY_UPDATE,"member",\@leden); #ADS_PROPERTY_UPDATE=2
+   $groep->SetInfo();
+
+   my $user=bind_object("cn=...,ou=...,ou=...,ou=labo,".domein);
+   print join(",",@{get_attribute_value($user,"memberOf")});
+}
+
+#only lab
+sub add_group_to_container{
+	my $cont=bind_object("ou=...,ou=...,ou=labo,".$domein);
+	my $groepnaam="groep";  # vul in naar keuze
+
+	foreach (in $cont) { #make sure groepnaam is unique
+        $_->GetInfoEx(["canonicalName"],0);
+        $_->Get("canonicalName") =~ m/.*\/(.*)$/;
+        lc($1) ne lc($groepnaam) or die "RDN moet uniek zijn !!"
+	}
+
+	my $command = ado_create_command();
+	my $domeinobj = bind_object( $domein);
+	my $sBase = $domeinobj->{adspath};
+	#group, computer or person with SAM = groepnaam
+	my $sFilter     = "(&(samAccountName=$groepnaam*)(|(objectcategory=group)(objectcategory=computer)(objectcategory=person)))";
+	my $sAttributes = "samAccountName";
+	ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes,"cn");
+
+	my $ADOrecordset = ado_exec_query($command);
+	my %lijst;
+	until ( $ADOrecordset->{EOF} ) {
+	    $lijst{$ADOrecordset->Fields("samAccountName")->{Value}}=1;
+	    $ADOrecordset->MoveNext();
+	}
+	$ADOrecordset->Close();
+	do {
+	    $samnaam=sprintf("%s%02d",lc($groepnaam),++$tel);
+	} while $lijst{$samnaam};
+
+	my $groep=$cont->Create("group", "cn=$groepnaam");
+	$groep->Put("samAccountName",$samnaam);
+	$groep->SetInfo();
+	print "toegevoegd met adspath: $groep->{adspath}\n"
+	     unless (Win32::OLE->LastError());
+
+	$groep->GetInfo();
+
+	printf "%20s is ingesteld op %s\n",$_,join ("
+	                                     ",@{get_attribute_value($groep,$_)})
+	     foreach in bind_object($groep->{schema})->{MandatoryProperties};
+
+}
+
+sub print_groups_with_type{
+	my @gtype=(ADS_GROUP_TYPE_GLOBAL_GROUP,ADS_GROUP_TYPE_DOMAIN_LOCAL_GROUP ,ADS_GROUP_TYPE_UNIVERSAL_GROUP);
+	my @zoek=("Globale Beveiligingsgroep","Locale Beveiligingsgroep","Universele Beveiligingsgroep",
+          "Globale Distributiegroep" ,"Locale Distributiegroep" ,"Universale Distributiegroep");
+	print $_+1,": $zoek[$_]\n" foreach 0..$#zoek;
+
+	do {
+	  print "Kies een type groep: ";
+	  chomp($nr=<STDIN>);
+	} while ($nr>@zoek || $nr<1);
+	$nr--;
+
+	my $command = ado_create_command();
+	my $domeinobj = bind_object($domein);
+	my $sBase = $domeinobj->{adspath};
+	my $sFilter     = "(&(&(objectcategory=group)(groupType:1.2.840.113556.1.4.803:=" . $gtype[$nr%3];
+    $sFilter    .= $nr<3 ? ")(" : ")(!";
+    $sFilter    .= "(groupType:1.2.840.113556.1.4.803:=" . ADS_GROUP_TYPE_SECURITY_ENABLED . "))))";
+	my $sAttributes = "samAccountName,grouptype";
+    ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes, "samAccountName");
+	
+	my $ADOrecordset = ado_exec_query($command);
+	print "Overzicht $zoek[$nr]en:\n";
+	until ( $ADOrecordset->{EOF} ) {
+	    printf "\t%04b\t%s\n",$ADOrecordset->Fields("groupType")->{Value}%16    # 4 laagste bits
+	                         ,$ADOrecordset->Fields("samAccountName")->{Value};
+	    $ADOrecordset->MoveNext();
+	}
+	$ADOrecordset->Close();
+}
+
+sub print_hex_values_from_groups{
+	my $command = ado_create_command();
+	# alle groepen ophalen
+	my $domeinobj = bind_object( $domein);
+	my $sBase = $domeinobj->{adspath};
+	my $sFilter     = "(objectcategory=group)";
+	my $sAttributes = "cn,groupType";
+	ado_create_query_from_command($command,$sBase, $sFilter, $sAttributes, "groupType");
+	
+	my $ADOrecordset = ado_exec_query($command);
+	until ( $ADOrecordset->{EOF} ) {
+	    printf "%04b\t%s\n",$ADOrecordset->Fields("groupType")->{Value}   # eerste bit staat op 1
+	                       ,$ADOrecordset->Fields("cn")->{Value};
+	    $ADOrecordset->MoveNext();
+	}
+	$ADOrecordset->Close();
+}
+
+#ToDo: oefening 8 geskipped.
+
+#only lab
+#update mail field based on user input for every object in the container
+sub update_mail{
+	my $cont=bind_object("ou=...,ou=...,ou=labo,".$RootObj->{defaultNamingContext}); # vul in
+	$cont->{filter}=["user"];                   # enkel users in de container
+
+	foreach (in $cont) {
+	   print "mail(" . $_->Get("cn") . ") is ";
+	   print $_->{mail} || "not set";
+	   print  "\n\tgeef nieuw mail-adres: ";
+	   chomp(my $nmail=<>);
+	   $nmail ? $_->Put("mail",$nmail)  # ook mogelijk om het ADSI-attribuut te gebruiken:
+	                                    # $_->{EmailAddress} = $nmail
+	                                    # of met PutEx en update
+	                                    # $_->PutEx(ADS_PROPERTY_UPDATE,"mail",[$nmail]);
+	          : $_->PutEx(ADS_PROPERTY_CLEAR,"mail",[]); # geen equivalent mogelijk met het ADSI-attribuut
+	   $_->SetInfo();
+	}
+}
+
+#only in lab
+sub add_user{
+
+	my $cont=bind_object("ou=...,ou=...,ou=labo,".$RootObj->{defaultNamingContext}); # vul in
+	my $usernaam="user_. . .";  # vul in max 20 tekens
+
+	foreach (in $cont) {#make sure username doesn't exist yet in the container
+	        $_->GetInfoEx(["canonicalName"],0);
+	        $_->Get("canonicalName") =~ m/.*\/(.*)$/;
+	        lc($1) ne lc($usernaam) or die "SPN moet uniek zijn !!"
+	}
+	#make sure one with the SAM doesn't already exist
+	my $samnaam=$usernaam;
+	my $command = ado_create_command();
+	my $domeinobj = bind_object( $domein);
+	my $sBase = $domeinobj->{adspath};
+	my $sFilter     = "(&(samAccountName=$samnaam)(|(objectcategory=group)(objectcategory=computer)(objectcategory=person)))";
+	my $sAttributes = "samAccountName";
+
+	ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes, "cn");
+	my $ADOrecordset = ado_exec_query($command);
+
+	$ADOrecordset->{EOF} or die "Samnaam moet uniek zijn !!";
+	$ADOrecordset->Close();
+	#create the user
+	my $user=$cont->Create("user", "cn=$usernaam");
+	$user->Put("samAccountName",$samnaam);
+	$user->SetInfo();
+	print "toegevoegd met adspath: $user->{adspath}\n"
+	     unless (Win32::OLE->LastError());
+
+	$user->GetInfo();
+	printf "%20s is ingesteld op %s\n",$_,join ("
+	                                     ",@{get_attribute_value($user,$_)})
+	     foreach in bind_object($user->{schema})->{MandatoryProperties};
+}
+
+sub print_all_SAM_names_and_longest{
+	my $command = ado_create_command();
+	my $domeinobj = bind_object($domein);
+
+	my $sBase = $domeinobj->{adspath};
+	my $sFilter     =  "(&(objectclass=user)(samAccountName=*))";
+	my $sAttributes = "samAccountName,objectcategory";
+
+    ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes, "cn");
+	my $ADOrecordset = ado_exec_query($command);
+	my $maxLength;
+	until ( $ADOrecordset->{EOF} ) {
+    	$samName=$ADOrecordset->Fields("samAccountName")->{Value};
+    	$maxLength=length($samName) if (length($samName)>$maxLength);
+    	print "$samName\n";
+    	$ADOrecordset->MoveNext();
+	}
+	$ADOrecordset->Close();
+	print "Maximale lengte is $maxLength\n";
+}
+
+#only in lab
+sub add_container_to_my_container{
+	my $cont=bind_object("ou= ... ,OU=Labo,".$RootObj->{defaultNamingContext});
+	my %lijst; # lijst maken van alle subcontainers van cont
+	foreach (in $cont) {
+	        $_->GetInfoEx(["canonicalName"],0);
+	        $_->Get("canonicalName") =~ m/.*\/(.*)$/;
+	        $lijst{lc($1)}=undef;
+	}
+
+	my $ou_naam=shift;#naam ingeven voor nieuwe container
+	while (exists $lijst{lc($ou_naam)} || !$ou_naam) {#tot iets nieuw opgegeven
+	     print qq[canonicalName moet uniek zijn !\nde volgende namen mag je niet meer nemen in deze container: "]
+	          ,join ('" "',keys %lijst),qq["\ngeef nieuwe naam:];
+	     chomp($ou_naam=<STDIN>);
+	}
+
+	my $ou=$cont->Create("organizationalunit", "ou=$ou_naam");  #vergeet niet ou= toe te voegen in de tweede parameter.
+	$ou->SetInfo();  #op het nieuwe object - niet op de container
+	print "toegevoegd met verplichte properties ",join (", ",in bind_object($ou->{schema})->{MandatoryProperties})
+	     unless (Win32::OLE->LastError());
+}
+
+#klasschema opvragen en dan bepaald verplicht attribuut kiezen voor te tonen(alle instanties).
+sub print_mandatory_attribute_from_class{
+	my $klassenaam = shift;
+	my $klasse = bind_object( "schema/$klassenaam" );
+	print "Verplicht attributen van $klassenaam:\n";
+	!Win32::OLE->LastError()
+		or die "je moet een ldapdisplayname van een klasse opgeven, vb container, organizationalUnit, ...\n";
+	$klasse->{Class} eq "Class"
+		or die "je moet een ldapdisplayname van een klasse opgeven, vb container, organizationalUnit, ...\n";
+
+	my $tel=0;
+	my @lijst=in $klasse->{MandatoryProperties};
+	foreach (@lijst) {
+	   $tel++;
+	   print "$tel:\t$_\n";
+	}
+
+	my $nr;
+	do { print "Kies een nummer <= $tel: ";
+	     $nr=<STDIN>;
+	   } until $nr>0 && $nr<=$tel;
+	$nr--;
+
+	my $Ldapdisplayname=$lijst[$nr];
+	print "\nOverzicht van $Ldapdisplayname:\n";
+
+	my $command = ado_create_command();
+	my $domeinobj = bind_object($domein);
+	my $sBase = $domeinobj->{adspath};
+	my $sFilter     = "(objectclass=$klassenaam)";
+	my $sAttributes = "distinguishedname";  #attribuut niet direct ophalen - kan geconstrueerd zijn ???
+	ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes, "cn");
+	
+	my $ADOrecordset = ado_exec_query($command);
+	until ($ADOrecordset->{EOF}) {
+	    my $object=bind_object($ADOrecordset->Fields("distinguishedname")->{Value});
+	    print join (";",@{valueattribuut($object,$Ldapdisplayname)}), " ($object->{name})\n"
+	        if (uc($object->{class}) eq uc($klassenaam));
+	    $ADOrecordset->MoveNext();
+	}
+	$ADOrecordset->Close();
+}
+
+#not possible at home
+#maak studenten met zelfde description als mij lid van mijn groep
+sub add_students_to_my_group{
+	my $command = ado_create_command();
+
+	my $groep=bind_object("cn=...,ou=...,ou=labo,". $RootObj->{defaultNamingContext}); #vul je eigen groep in
+	$groep->GetInfoEx(["member"],0);
+	my $descriptionvalue="*2/1*/*0"; #vervang dit door je eigen beschrijving
+
+	my $domeinobj = bind_object($domein);
+	my $sBase = $domeinobj->{adspath};
+	my $sFilter     = "(&(description=" . $descriptionvalue . ")(objectclass=user)(objectcategory=person))";
+	my $sAttributes = "distinguishedName";
+	ado_create_query_from_command($command, $sBase,$sFilter,$sAttributes,"cn");
+
+	my $ADOrecordset = ado_exec_query($command);
+	my @lijst;
+	until ( $ADOrecordset->{EOF} ) {
+	    push @lijst,$ADOrecordset->Fields("distinguishedName")->{Value};
+	    $ADOrecordset->MoveNext();
+	}
+	$ADOrecordset->Close();
+
+	$groep->PutEx(ADS_PROPERTY_UPDATE,"member",\@lijst); #ADS_PROPERTY_UPDATE=2
+	$groep->SetInfo() unless Win32::OLE->LastError();  
+	print Win32::OLE->LastError(); #na setInfo wordt eventueel een fout gegeven
+}
+
+
+#return value from attribute in array
+sub get_attribute_value {
+    my ($object,$attribuut)=@_;
+    my $attr_schema = bind_object( "schema/$attribuut" );
+    my $tabel = $object->GetEx($attribuut);
+
+    if (Win32::OLE->LastError() == Win32::OLE::HRESULT(0x8000500D)){
+    	# maybe it wasn't cached
+		$object->GetInfoEx([$attribuut], 0);
+        $tabel = $object->GetEx($attribuut);
+    }
+    #if still not found
+    return ["<niet ingesteld>"] if Win32::OLE->LastError() == Win32::OLE::HRESULT(0x8000500D);
+
+    my $v=[];
+    foreach ( in $tabel ) {
+        if ( $attr_schema->{Syntax} eq "OctetString" ) {
+            $waarde = sprintf ("%*v02X ","", $_) ;
+        }
+        elsif ( $attr_schema->{Syntax} eq "ObjectSecurityDescriptor" ) {
+            $waarde = "eigenaar is ... " . $_->{owner};
+        }
+        elsif ( $attr_schema->{Syntax} eq "INTEGER8" ) {
+            $waarde = convert_BigInt_string($_->{HighPart},$_->{LowPart});
+        }
+        else {
+            $waarde = $_;
+        }
+        push @{$v},$waarde;
+    }
+    return $v;
+}
+
+
+################# reeks 8 ^  ##############
 
 sub get_users_from_group{
 	my $group = shift;
@@ -162,24 +549,24 @@ sub find_group_name_from_student{
 }
 
 sub print_with_cn_filter{
-$command = ado_create_command();
+	$command = ado_create_command();
 
-my $domeinobj  = bind_object( $domein );
-my $sBase  = $domeinobj->{adspath};
-my $sFilter     = "(&(objectCategory=computer)(cn=*A))";
-#my $sFilter     = "(&(objectCategory=computer)(name=*A))"; #lukt evengoed
-#my $sFilter     = "(&(objectCategory=computer)(canonicalname=*A))";    #geeft geen enkel resultaat
-my $sAttributes = "cn,canonicalName";
+	my $domeinobj  = bind_object( $domein );
+	my $sBase  = $domeinobj->{adspath};
+	my $sFilter     = "(&(objectCategory=computer)(cn=*A))";
+	#my $sFilter     = "(&(objectCategory=computer)(name=*A))"; #lukt evengoed
+	#my $sFilter     = "(&(objectCategory=computer)(canonicalname=*A))";    #geeft geen enkel resultaat
+	my $sAttributes = "cn,canonicalName";
 
-ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes, "cn");
+	ado_create_query_from_command($command, $sBase, $sFilter, $sAttributes, "cn");
 
-my $ADOrecordset = ado_exec_query($command);
-until ( $ADOrecordset->{EOF} ) {
-    printf "%-20s %s %s\n",$ADOrecordset->Fields("cn")->{Value}
+	my $ADOrecordset = ado_exec_query($command);
+	until ( $ADOrecordset->{EOF} ) {
+    	printf "%-20s %s %s\n",$ADOrecordset->Fields("cn")->{Value}
                           ,$ADOrecordset->Fields("canonicalName")->{Value}->[0];
-    $ADOrecordset->MoveNext();
-   }
-   $ADOrecordset->Close();
+    	$ADOrecordset->MoveNext();
+    }
+    $ADOrecordset->Close();
 }
 
 sub print_classes_with_attribute{
@@ -248,11 +635,11 @@ sub find_students_with_postcode{
 	my $ADOrecordset = ado_exec_query($command);
 	Win32::OLE->LastError() && die Win32::OLE->LastError();
 	until ( $ADOrecordset->{EOF} )  {
-     # printf "%-25s %s %s\n",$ADOrecordset->Fields("cn")->{Value}
-     #                     ,$ADOrecordset->Fields("streetAddress")->{Value}
-     #                     ,$ADOrecordset->Fields("l")->{Value};
+      # printf "%-25s %s %s\n",$ADOrecordset->Fields("cn")->{Value}
+      #                     ,$ADOrecordset->Fields("streetAddress")->{Value}
+      #                     ,$ADOrecordset->Fields("l")->{Value};
         ado_show_record_fields($ADOrecordset);
-    $ADOrecordset->MoveNext();
+    	$ADOrecordset->MoveNext();
 	}  	
    	$ADOrecordset->Close();
 }
@@ -287,9 +674,8 @@ sub ado_print_recordset_info_from{
           , $ADOrecordset->Fields("printMaxResolutionSupported")->{Value} , "\t"
           , $ADOrecordset->Fields("printerName")->{Value} , "\n";
       $ADOrecordset->MoveNext();
-  }
-  $ADOrecordset->Close();
-  #$ADOconnection->Close();
+    }
+    $ADOrecordset->Close();
 }
 
 sub ado_exec_query{
@@ -371,29 +757,6 @@ sub print_all_attributes_syntax{
 }
 
 sub print_abstract_properties_admin_account{
-	my %E_ADS = (
-	    BAD_PATHNAME            => Win32::OLE::HRESULT(0x80005000),
-	    UNKNOWN_OBJECT          => Win32::OLE::HRESULT(0x80005004),
-	    PROPERTY_NOT_SET        => Win32::OLE::HRESULT(0x80005005),
-	    PROPERTY_INVALID        => Win32::OLE::HRESULT(0x80005007),
-	    BAD_PARAMETER           => Win32::OLE::HRESULT(0x80005008),
-	    OBJECT_UNBOUND          => Win32::OLE::HRESULT(0x80005009),
-	    PROPERTY_MODIFIED       => Win32::OLE::HRESULT(0x8000500B),
-	    OBJECT_EXISTS           => Win32::OLE::HRESULT(0x8000500E),
-	    SCHEMA_VIOLATION        => Win32::OLE::HRESULT(0x8000500F),
-	    COLUMN_NOT_SET          => Win32::OLE::HRESULT(0x80005010),
-	    ERRORSOCCURRED          => Win32::OLE::HRESULT(0x00005011),
-	    NOMORE_ROWS             => Win32::OLE::HRESULT(0x00005012),
-	    NOMORE_COLUMNS          => Win32::OLE::HRESULT(0x00005013),
-	    INVALID_FILTER          => Win32::OLE::HRESULT(0x80005014),
-	    INVALID_DOMAIN_OBJECT   => Win32::OLE::HRESULT(0x80005001),
-	    INVALID_USER_OBJECT     => Win32::OLE::HRESULT(0x80005002),
-	    INVALID_COMPUTER_OBJECT => Win32::OLE::HRESULT(0x80005003),
-	    PROPERTY_NOT_SUPPORTED  => Win32::OLE::HRESULT(0x80005006),
-	    PROPERTY_NOT_MODIFIED   => Win32::OLE::HRESULT(0x8000500A),
-	    CANT_CONVERT_DATATYPE   => Win32::OLE::HRESULT(0x8000500C),
-	    PROPERTY_NOT_FOUND      => Win32::OLE::HRESULT(0x8000500D) );
-
 	my $teller = 0;
 
 	my $object = bind_object("CN=Administrator,CN=Users,".$RootObj->get(defaultNamingContext));
@@ -438,17 +801,6 @@ sub printlijn {
     ${$refprefix} = "";
 }
 
-use Math::BigInt;
-sub convert_BigInt_string{
-    my ($high,$low)=@_;
-    my $HighPart = Math::BigInt->new($high);
-    my $LowPart  = Math::BigInt->new($low);
-    my $Radix    = Math::BigInt->new('0x100000000'); #dit is 2^32
-    $LowPart+=$Radix if ($LowPart<0); #als unsigned int interperteren
-
-    return ($HighPart * $Radix + $LowPart);
-}
-
 sub print_adsi_properties_from_class{
 	my $argument=shift;
 	my $abstracteKlasse  = bind_object( "schema/$argument" );
@@ -475,29 +827,6 @@ sub print_abstract_schema{
 
 sub print_schema_info{
 	my $argument = shift; #either an attribute("Ldap-Display-Name") or class("user")
-	my %E_ADS = (
-	    BAD_PATHNAME            => Win32::OLE::HRESULT(0x80005000),
-	    UNKNOWN_OBJECT          => Win32::OLE::HRESULT(0x80005004),
-	    PROPERTY_NOT_SET        => Win32::OLE::HRESULT(0x80005005),
-	    PROPERTY_INVALID        => Win32::OLE::HRESULT(0x80005007),
-	    BAD_PARAMETER           => Win32::OLE::HRESULT(0x80005008),
-	    OBJECT_UNBOUND          => Win32::OLE::HRESULT(0x80005009),
-	    PROPERTY_MODIFIED       => Win32::OLE::HRESULT(0x8000500B),
-	    OBJECT_EXISTS           => Win32::OLE::HRESULT(0x8000500E),
-	    SCHEMA_VIOLATION        => Win32::OLE::HRESULT(0x8000500F),
-	    COLUMN_NOT_SET          => Win32::OLE::HRESULT(0x80005010),
-	    ERRORSOCCURRED          => Win32::OLE::HRESULT(0x00005011),
-	    NOMORE_ROWS             => Win32::OLE::HRESULT(0x00005012),
-	    NOMORE_COLUMNS          => Win32::OLE::HRESULT(0x00005013),
-	    INVALID_FILTER          => Win32::OLE::HRESULT(0x80005014),
-	    INVALID_DOMAIN_OBJECT   => Win32::OLE::HRESULT(0x80005001),
-	    INVALID_USER_OBJECT     => Win32::OLE::HRESULT(0x80005002),
-	    INVALID_COMPUTER_OBJECT => Win32::OLE::HRESULT(0x80005003),
-	    PROPERTY_NOT_SUPPORTED  => Win32::OLE::HRESULT(0x80005006),
-	    PROPERTY_NOT_MODIFIED   => Win32::OLE::HRESULT(0x8000500A),
-	    CANT_CONVERT_DATATYPE   => Win32::OLE::HRESULT(0x8000500C),
-	    PROPERTY_NOT_FOUND      => Win32::OLE::HRESULT(0x8000500D) );
-
 	my $object  = bind_object( "cn=" . $argument . "," . $RootObj->Get("schemaNamingContext") );
 
 	if ( $object->{"Class"} eq "attributeSchema" ) {
@@ -614,7 +943,7 @@ sub print_property_cache{
 # Onderstaande functie berekent deze waarde met behulp van de module Math::BigInt.
 # Een bijkomend probleem is dat je deze waarde enkel met print juist uitschrijft,
 # gebruik je printf dan moet je %s en niet %g gebruiken, anders krijg je een "afgeronde" waarde.
-use Math::BigInt;
+
 sub convert_BigInt_string{
     my ($high,$low)=@_;
     my $HighPart = Math::BigInt->new($high);
@@ -792,16 +1121,15 @@ sub handle_input{
 	&$method(@data);
 }
 
-#todo: rewrite
 sub get_moniker{
 	my %monikers = (
-		"loggedinhogent" => "LDAP://CN=Satan,OU=Domain Controllers,DC=iii,DC=hogent,DC=be",
-		"loggedinhogent2" => "LDAP://iii.hogent.be/CN=Belial,OU=Domain Controllers,DC=iii,DC=hogent,DC=be",
-		"homehogentip" => "LDAP://193.190.126.71/CN=Satan,OU=Domain Controllers,DC=iii,DC=hogent,DC=be",
-		"homehogentdns" => "LDAP://satan.hogent.be/CN=Satan,OU=Domain Controllers,DC=iii,DC=hogent,DC=be",
+		"loggedinhogent" => "LDAP://CN=Satan,OU=Domain Controllers,".$domein,
+		"loggedinhogent2" => "LDAP://iii.hogent.be/CN=Belial,OU=Domain Controllers,".$domein,
+		"homehogentip" => "LDAP://193.190.126.71/CN=Satan,OU=Domain Controllers,".$domein,
+		"homehogentdns" => "LDAP://satan.hogent.be/CN=Satan,OU=Domain Controllers,".$domein,
 		"loggedinugent" => "LDAP://CN=UGENTDC1,OU=Domain Controllers,DC=ugent,DC=be",
 		"homeugentvpn" => "LDAP://ugentdc1.ugent.be:636/CN=UGENTDC2,OU=Domain Controllers,DC=ugent,DC=be",
-		"xandro" => "CN=Xandro Vermeulen,OU=EM7INF,OU=Studenten,OU=iii,DC=iii,DC=hogent,DC=be"
+		"xandro" => "CN=Xandro Vermeulen,OU=EM7INF,OU=Studenten,OU=iii,".$domein
 		);	
 	return $monikers{lc(shift)}
 }
