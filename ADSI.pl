@@ -112,7 +112,7 @@ sub add_group_to_container{
         $_->Get("canonicalName") =~ m/.*\/(.*)$/;
         lc($1) ne lc($groepnaam) or die "RDN moet uniek zijn !!"
 	}
-
+	#make sure SAM is unique
 	my $command = ado_create_command();
 	my $domeinobj = bind_object( $domein);
 	my $sBase = $domeinobj->{adspath};
@@ -364,7 +364,7 @@ sub add_students_to_my_group{
 	}
 	$ADOrecordset->Close();
 
-	$groep->PutEx(ADS_PROPERTY_UPDATE,"member",\@lijst); #ADS_PROPERTY_UPDATE=2
+	$groep->PutEx(ADS_PROPERTY_UPDATE,"member",\@lijst); #ADS_PROPERTY_UPDATE=2  ; the member attribute from groep will be multivalued : lijst
 	$groep->SetInfo() unless Win32::OLE->LastError();  
 	print Win32::OLE->LastError(); #na setInfo wordt eventueel een fout gegeven
 }
@@ -385,7 +385,7 @@ sub get_attribute_value {
     return ["<niet ingesteld>"] if Win32::OLE->LastError() == Win32::OLE::HRESULT(0x8000500D);
 
     my $v=[];
-    foreach ( in $tabel ) {
+    foreach ( in $tabel ) { #assign value to waarde depending on the type
         if ( $attr_schema->{Syntax} eq "OctetString" ) {
             $waarde = sprintf ("%*v02X ","", $_) ;
         }
